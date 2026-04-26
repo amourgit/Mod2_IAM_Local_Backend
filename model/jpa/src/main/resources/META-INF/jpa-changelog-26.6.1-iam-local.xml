@@ -1,0 +1,281 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<!--
+    =========================================================================
+    IAM Local UOB — Changelog Liquibase
+    Version : 26.6.1-iam-local (basée sur Keycloak 26.6.0)
+    Auteur  : iam-local
+
+    Ce changelog est intégré natif dans le pipeline de migration Keycloak.
+    Il est exécuté par Liquibase au même titre que tous les changelogs natifs.
+    Liquibase garantit l'idempotence : si un changeset a déjà été appliqué,
+    il est ignoré au démarrage suivant.
+
+    CONTENU :
+      1. Colonnes natives dans USER_ENTITY (champs IAM Local sur le profil)
+         - ID_COMPTE_LOCAL      : UUID du CompteLocal associé
+         - IDENTIFIANT_NATIONAL : numéro national (ETU-2025-00412)
+         - STATUT_COMPTE        : ACTIF / SUSPENDU / DESACTIVE
+
+      2. Table COMPTE_LOCAL (aggregate root du module Compte)
+         - vérité identitaire locale de toute personne à l'UOB
+         - alimentée par provisioning Kafka depuis l'IAM Central
+
+      3. Index de performance sur les deux artefacts
+    =========================================================================
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+
+    <!-- =====================================================================
+         CHANGESET 1 : Colonnes natives IAM Local dans USER_ENTITY
+         Ajout direct dans la table USER_ENTITY de Keycloak.
+         Ces colonnes sont au même niveau que USERNAME, EMAIL, ENABLED.
+         Accès sans jointure via user.getIdCompteLocal(), etc.
+         ===================================================================== -->
+    <changeSet id="26.6.1-iam-local-001" author="iam-local">
+
+        <comment>
+            Ajout des champs natifs IAM Local dans USER_ENTITY.
+            Ces colonnes permettent l'accès direct (sans jointure USER_ATTRIBUTE)
+            aux informations de liaison CompteLocal depuis n'importe quel UserModel.
+        </comment>
+
+        <!-- UUID du CompteLocal UOB associé à ce profil Keycloak -->
+        <addColumn tableName="USER_ENTITY">
+            <column name="ID_COMPTE_LOCAL" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <!-- Numéro national (ETU-2025-00412, PERS-2020-00001, ...) -->
+        <addColumn tableName="USER_ENTITY">
+            <column name="IDENTIFIANT_NATIONAL" type="VARCHAR(30)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <!-- Statut du compte : ACTIF / SUSPENDU / DESACTIVE -->
+        <addColumn tableName="USER_ENTITY">
+            <column name="STATUT_COMPTE" type="VARCHAR(20)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <!-- Index pour recherche rapide par ID_COMPTE_LOCAL -->
+        <createIndex
+            tableName="USER_ENTITY"
+            indexName="IDX_USER_ID_COMPTE_LOCAL">
+            <column name="ID_COMPTE_LOCAL"/>
+        </createIndex>
+
+        <!-- Index pour recherche rapide par IDENTIFIANT_NATIONAL -->
+        <createIndex
+            tableName="USER_ENTITY"
+            indexName="IDX_USER_IDENTIFIANT_NATIONAL">
+            <column name="IDENTIFIANT_NATIONAL"/>
+        </createIndex>
+
+    </changeSet>
+
+    <!-- =====================================================================
+         CHANGESET 2 : Table COMPTE_LOCAL
+         Aggregate root du module Compte — vérité identitaire locale UOB.
+         Alimentée exclusivement par provisioning Kafka depuis l'IAM Central.
+         Utilise les mêmes conventions que les tables Keycloak natives :
+           - Noms de colonnes en MAJUSCULES avec underscores
+           - PK en VARCHAR(36) (UUID stocké en string, comme Keycloak)
+           - Pas de séquences — UUID généré applicativement
+         ===================================================================== -->
+    <changeSet id="26.6.1-iam-local-002" author="iam-local">
+
+        <comment>
+            Création de la table COMPTE_LOCAL.
+            Vérité identitaire locale de toute personne à l'UOB.
+            Cette table est la source de vérité pour les liaisons entre
+            profils Keycloak locaux et l'IAM Central national.
+        </comment>
+
+        <createTable tableName="COMPTE_LOCAL">
+
+            <!-- ── Identifiants ─────────────────────────────────────────── -->
+
+            <!-- Clé primaire locale — UUID généré par l'application -->
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="PK_COMPTE_LOCAL"/>
+            </column>
+
+            <!--
+                Clé de liaison permanente avec l'IAM Central.
+                Correspond à l'UUID Keycloak du realm national.
+                IMMUABLE après création — ne jamais modifier.
+            -->
+            <column name="USER_ID_NATIONAL" type="VARCHAR(36)">
+                <constraints nullable="false"
+                             unique="true"
+                             uniqueConstraintName="UQ_COMPTE_USER_ID_NATIONAL"/>
+            </column>
+
+            <!--
+                Numéro national unique de la personne.
+                Format : PREFIX-ANNEE-SEQUENCE (ex: ETU-2025-00412)
+                IMMUABLE après création.
+            -->
+            <column name="IDENTIFIANT_NATIONAL" type="VARCHAR(30)">
+                <constraints nullable="false"
+                             unique="true"
+                             uniqueConstraintName="UQ_COMPTE_IDENTIFIANT_NATIONAL"/>
+            </column>
+
+            <!-- ── Données nominales synchronisées depuis IAM Central ───── -->
+
+            <column name="NOM" type="VARCHAR(100)">
+                <constraints nullable="false"/>
+            </column>
+
+            <column name="PRENOM" type="VARCHAR(100)">
+                <constraints nullable="false"/>
+            </column>
+
+            <column name="EMAIL_INSTITUTIONNEL" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+
+            <column name="ETABLISSEMENT_CODE" type="VARCHAR(20)">
+                <constraints nullable="false"/>
+            </column>
+
+            <!-- ETUDIANT / PERSONNEL_ADM / ENSEIGNANT / ENSEIGNANT_ADM -->
+            <column name="TYPE_PROFIL_SUGGERE" type="VARCHAR(30)">
+                <constraints nullable="false"/>
+            </column>
+
+            <!-- ── Contexte scolaire (nullable pour personnel non ens.) ─── -->
+
+            <!-- Ex: L1-Informatique, M2-Droit-Public -->
+            <column name="FILIERE" type="VARCHAR(100)">
+                <constraints nullable="true"/>
+            </column>
+
+            <!-- Ex: FST, FDSE, FSEG -->
+            <column name="COMPOSANTE" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+
+            <!-- ── Cycle de vie ─────────────────────────────────────────── -->
+
+            <!-- ACTIF / SUSPENDU / DESACTIVE -->
+            <column name="STATUT" type="VARCHAR(20)" defaultValue="ACTIF">
+                <constraints nullable="false"/>
+            </column>
+
+            <column name="CREE_LE" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+
+            <column name="MIS_A_JOUR_LE" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+
+            <!-- Renseigné uniquement si STATUT = DESACTIVE -->
+            <column name="DESACTIVE_LE" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="true"/>
+            </column>
+
+            <!-- ── Idempotence Kafka ────────────────────────────────────── -->
+
+            <!--
+                Hash SHA-256 du dernier payload IAM Central traité.
+                Permet de rejeter les events Kafka dupliqués sans
+                aller jusqu'à la logique métier.
+            -->
+            <column name="VERSION_HASH" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+
+            <!-- ── Traçabilité des modifications manuelles ─────────────── -->
+
+            <!-- Motif de la dernière modification manuelle (cas extrême) -->
+            <column name="DERNIER_MOTIF_MODIFICATION" type="VARCHAR(500)">
+                <constraints nullable="true"/>
+            </column>
+
+            <!-- 0 = jamais modifié manuellement. > 0 = cas extrême documenté -->
+            <column name="NOMBRE_MODIFICATIONS_MANUELLES" type="INTEGER"
+                    defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+
+            <!-- ── Optimistic locking (JPA @Version) ───────────────────── -->
+            <column name="VERSION" type="BIGINT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+
+        </createTable>
+
+        <!-- Index de performance pour les requêtes fréquentes -->
+
+        <createIndex
+            tableName="COMPTE_LOCAL"
+            indexName="IDX_COMPTE_STATUT">
+            <column name="STATUT"/>
+        </createIndex>
+
+        <createIndex
+            tableName="COMPTE_LOCAL"
+            indexName="IDX_COMPTE_ETABLISSEMENT">
+            <column name="ETABLISSEMENT_CODE"/>
+        </createIndex>
+
+        <createIndex
+            tableName="COMPTE_LOCAL"
+            indexName="IDX_COMPTE_TYPE_PROFIL">
+            <column name="TYPE_PROFIL_SUGGERE"/>
+        </createIndex>
+
+        <createIndex
+            tableName="COMPTE_LOCAL"
+            indexName="IDX_COMPTE_CREE_LE">
+            <column name="CREE_LE" descending="true"/>
+        </createIndex>
+
+    </changeSet>
+
+    <!-- =====================================================================
+         CHANGESET 3 : Contraintes CHECK sur COMPTE_LOCAL
+         Séparé du changeset 2 pour être rejoué indépendamment si besoin.
+         ===================================================================== -->
+    <changeSet id="26.6.1-iam-local-003" author="iam-local">
+
+        <comment>
+            Contraintes CHECK sur les valeurs autorisées dans COMPTE_LOCAL.
+            Garantit l'intégrité des données au niveau base de données,
+            en complément de la validation applicative du domaine.
+        </comment>
+
+        <sql>
+            ALTER TABLE COMPTE_LOCAL
+                ADD CONSTRAINT CHK_COMPTE_STATUT
+                CHECK (STATUT IN ('ACTIF', 'SUSPENDU', 'DESACTIVE'));
+
+            ALTER TABLE COMPTE_LOCAL
+                ADD CONSTRAINT CHK_COMPTE_TYPE_PROFIL
+                CHECK (TYPE_PROFIL_SUGGERE IN (
+                    'ETUDIANT', 'PERSONNEL_ADM', 'ENSEIGNANT', 'ENSEIGNANT_ADM'
+                ));
+        </sql>
+
+        <!-- Rollback : supprimer les contraintes si on revient en arrière -->
+        <rollback>
+            <sql>
+                ALTER TABLE COMPTE_LOCAL DROP CONSTRAINT IF EXISTS CHK_COMPTE_STATUT;
+                ALTER TABLE COMPTE_LOCAL DROP CONSTRAINT IF EXISTS CHK_COMPTE_TYPE_PROFIL;
+            </sql>
+        </rollback>
+
+    </changeSet>
+
+</databaseChangeLog>

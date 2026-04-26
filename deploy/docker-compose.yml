@@ -1,0 +1,202 @@
+# =============================================================================
+# IAM Local UOB — Docker Compose
+# Keycloak 26.6.0 + PostgreSQL + Kafka
+# NOTE : "version" supprimé — obsolète depuis Docker Compose v2
+# =============================================================================
+
+networks:
+  iam-network:
+    driver: bridge
+    name: iam-local-network
+
+volumes:
+  postgres-data:
+    name: iam-postgres-data
+  keycloak_logs:
+    name: iam-keycloak-logs
+  keycloak_data:
+    name: iam-keycloak-data
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: iam-postgres
+    restart: unless-stopped
+    networks:
+      - iam-network
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_root_uob_2025
+      POSTGRES_DB: postgres
+      # Pas de POSTGRES_INITDB_ARGS avec locale — alpine ne supporte pas fr_FR
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ── Zookeeper ───────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: iam-zookeeper
+    restart: unless-stopped
+    networks:
+      - iam-network
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Kafka ───────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: iam-kafka
+    restart: unless-stopped
+    networks:
+      - iam-network
+    ports:
+      - "29092:29092"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_LOG_RETENTION_HOURS: 168
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # ── Kafka Init — création des topics ────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: iam-kafka-init
+    networks:
+      - iam-network
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo '=== Création des topics IAM Central ===' && \
+        kafka-topics --bootstrap-server kafka:9092 --create \
+          --if-not-exists --topic iam.central.compte.cree \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=604800000 && \
+        kafka-topics --bootstrap-server kafka:9092 --create \
+          --if-not-exists --topic iam.central.compte.mis_a_jour \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=604800000 && \
+        kafka-topics --bootstrap-server kafka:9092 --create \
+          --if-not-exists --topic iam.central.compte.desactive \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=604800000 && \
+        echo '=== Topics créés ===' && \
+        kafka-topics --bootstrap-server kafka:9092 --list
+    restart: on-failure
+
+  # ── Kafka UI ─────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: iam-kafka-ui
+    restart: unless-stopped
+    networks:
+      - iam-network
+    ports:
+      - "8888:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: iam-local-uob
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+  # ── Keycloak 26.6.0 Personalisé IAM Local UOB ───────────────────────────────
+  keycloak:
+    build:
+      context: ./keycloak
+      dockerfile: Dockerfile
+    container_name: iam-keycloak
+    restart: unless-stopped
+    networks:
+      - iam-network
+    ports:
+      - "8080:8080"
+      - "8787:8787"  # Debug port
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - keycloak_logs:/opt/keycloak/logs
+      - keycloak_data:/opt/keycloak/data
+    environment:
+      # ── Base de données unique ───────────────────────────────────────────
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak_iam_local
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak_secret_uob_2025
+      KC_DB_SCHEMA: public
+      KC_DB_POOL_MIN_SIZE: 5
+      KC_DB_POOL_MAX_SIZE: 20
+      KC_DB_MIGRATION: auto
+
+      # ── Serveur ──────────────────────────────────────────────────────────
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: 8080
+      KC_PROXY: edge
+
+      # ── Admin ────────────────────────────────────────────────────────────
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: Admin_UOB_2025!
+
+      # ── Features activées (vos modules IAM) ─────────────────────────────
+      KC_FEATURES: preview,account-api,admin-fine-grained-authz
+
+      # ── Logging ──────────────────────────────────────────────────────────
+      KC_LOG_LEVEL: INFO
+      KC_LOG_CONSOLE_COLOR: "true"
+
+      # ── Health ───────────────────────────────────────────────────────────
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+
+    command: start-dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+

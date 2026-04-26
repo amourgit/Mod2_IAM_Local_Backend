@@ -1,0 +1,150 @@
+# =============================================================================
+# IAM Local UOB — Configuration Spring Boot du module Compte
+# Profile par défaut : local (développement sans Docker)
+# =============================================================================
+
+spring:
+  application:
+    name: iam-compte
+
+  # ── JPA / Hibernate ──────────────────────────────────────────────────────────
+  jpa:
+    hibernate:
+      ddl-auto: validate           # Flyway gère le schéma — Hibernate valide uniquement
+    show-sql: false
+    open-in-view: false            # Désactivé — évite les lazy loading hors transaction
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        jdbc:
+          batch_size: 25           # Insert/update en batch pour les performances
+          fetch_size: 50
+        order_inserts: true
+        order_updates: true
+        connection:
+          provider_disables_autocommit: true
+
+
+  # ── Kafka ─────────────────────────────────────────────────────────────────────
+  kafka:
+    consumer:
+      group-id: iam-local-uob
+      auto-offset-reset: earliest  # Rejoue depuis le début si nouveau consumer group
+      enable-auto-commit: false    # Acquittement manuel obligatoire
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "ga.uob.iam.local.compte.infrastructure.kafka.dto"
+        spring.json.use.type.headers: false
+        # Retry en cas d'erreur réseau Kafka
+        reconnect.backoff.ms: 1000
+        reconnect.backoff.max.ms: 10000
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 10000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    listener:
+      ack-mode: manual_immediate
+
+  # ── Jackson ───────────────────────────────────────────────────────────────────
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+    default-property-inclusion: non_null
+
+# ── Keycloak (connexion pour écrire les attributs natifs) ─────────────────────
+keycloak:
+  realm: ${KEYCLOAK_REALM:iam-local-uob}
+  auth-server-url: ${KEYCLOAK_URL:http://localhost:8080}
+
+# ── Serveur HTTP ──────────────────────────────────────────────────────────────
+server:
+  port: ${IAM_COMPTE_PORT:8090}
+  shutdown: graceful               # Attend la fin des requêtes en cours avant shutdown
+
+# ── Actuator (health, metrics) ────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,flyway
+  endpoint:
+    health:
+      show-details: when-authorized
+  health:
+    kafka:
+      enabled: true
+    db:
+      enabled: true
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: ${LOG_LEVEL_ROOT:INFO}
+    ga.uob.iam: ${LOG_LEVEL_IAM:DEBUG}
+    org.springframework.kafka: INFO
+    org.hibernate.SQL: WARN
+    org.flywaydb: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{userIdNational}] [%X{identifiantNational}] %logger{36} - %msg%n"
+
+---
+# =============================================================================
+# Profile : local (développement sans Docker — base et Kafka locaux)
+# Activation : spring.profiles.active=local
+# =============================================================================
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/iam_compte_local
+    username: iam_compte
+    password: iam_compte_secret_uob_2025
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: iam-compte-pool
+      minimum-idle: 2
+      maximum-pool-size: 10
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  kafka:
+    bootstrap-servers: localhost:29092
+
+---
+# =============================================================================
+# Profile : docker (exécution dans le docker-compose)
+# Activation : SPRING_PROFILES_ACTIVE=docker (variable d'env dans docker-compose)
+# =============================================================================
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:postgres}:${POSTGRES_PORT:5432}/${POSTGRES_COMPTE_DB:iam_compte_local}
+    username: ${POSTGRES_COMPTE_USER:iam_compte}
+    password: ${POSTGRES_COMPTE_PASSWORD:iam_compte_secret_uob_2025}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: iam-compte-docker-pool
+      minimum-idle: 3
+      maximum-pool-size: 20
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  kafka:
+    bootstrap-servers: ${KAFKA_HOST:kafka}:${KAFKA_PORT:9092}
+
+keycloak:
+  realm: ${KEYCLOAK_REALM:iam-local-uob}
+  auth-server-url: http://${KC_HOSTNAME:keycloak}:8080
+
