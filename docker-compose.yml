@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # Base de données PostgreSQL pour Keycloak IAM Local
+  iam-postgres-dev:
+    image: postgres:16-alpine
+    container_name: iam-postgres-dev
+    restart: unless-stopped
+    
+    # Configuration réseau
+    ports:
+      - "5432:5432"
+    
+    # Variables d'environnement
+    environment:
+      POSTGRES_DB: keycloak_iam_local
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak_secret_uob_2025
+    
+    # Volume pour la persistance des données
+    volumes:
+      - iam_postgres_data:/var/lib/postgresql/data
+
+# Définition du volume
+volumes:
+  iam_postgres_data:
+    driver: local

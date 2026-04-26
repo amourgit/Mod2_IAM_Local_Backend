@@ -309,7 +309,6 @@
         <module>rest</module>
         <module>integration</module>
         <module>authz</module>
-        <module>js</module>
         <module>test-framework</module>
         <module>tests</module>
         <module>quarkus</module>
