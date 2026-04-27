@@ -12,6 +12,9 @@ ENV KC_FEATURES=preview,account-api,admin-fine-grained-authz
 ENV KC_LOG_LEVEL=INFO
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
+# Désactiver la création automatique d'admin
+ENV KC_BOOTSTRAP_ADMIN_USERNAME=""
+ENV KC_BOOTSTRAP_ADMIN_PASSWORD=""
 
 # Création de l'utilisateur keycloak
 RUN addgroup -S keycloak && adduser -S -G keycloak keycloak
@@ -42,4 +45,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=30 \
     CMD curl -f http://localhost:8080/health/ready || exit 1
 
 # Commande de démarrage
-ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start-dev"]
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start", "--optimized"]

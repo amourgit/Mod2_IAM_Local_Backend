@@ -178,7 +178,9 @@ services:
       KC_PROXY: edge
 
       # ── Admin ────────────────────────────────────────────────────────────
-      # Plus de création automatique d'admin
+      # Désactiver explicitement la création automatique d'admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: ""
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ""
       # L'administrateur sera créé via le formulaire Keycloak
 
       # ── Features activées (vos modules IAM) ─────────────────────────────

@@ -1,0 +1,42 @@
+# =============================================================================
+# IAM Local UOB v0.0.0 — Docker Compose Production
+# =============================================================================
+version: "3.8"
+
+services:
+  # ── PostgreSQL (Base de données unique) ─────────────────────────────────────
+  postgres:
+    image: postgres:18
+    container_name: iam-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak_iam_local
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak_secret_uob_2025
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - iam_postgres_data:/var/lib/postgresql
+      - iam_postgres_logs:/var/log/postgresql
+    networks:
+      - iam-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak_iam_local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  iam_postgres_data:
+    driver: local
+  iam_postgres_logs:
+    driver: local
+
+networks:
+  iam-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
