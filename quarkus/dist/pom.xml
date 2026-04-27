@@ -45,6 +45,12 @@
             <artifactId>keycloak-client-cli-dist</artifactId>
             <type>zip</type>
         </dependency>
+        <!-- IAM Local SPI -->
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>iam-compte-keycloak-spi</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -79,6 +85,13 @@
                                     <artifactId>keycloak-quarkus-server-app</artifactId>
                                     <type>jar</type>
                                     <outputDirectory>target/keycloak-quarkus-server-app</outputDirectory>
+                                </artifactItem>
+                                <!-- IAM Local SPI -->
+                                <artifactItem>
+                                    <groupId>org.keycloak</groupId>
+                                    <artifactId>iam-compte-keycloak-spi</artifactId>
+                                    <type>jar</type>
+                                    <outputDirectory>target/keycloak-providers</outputDirectory>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>

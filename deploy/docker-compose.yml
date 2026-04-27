@@ -178,8 +178,8 @@ services:
       KC_PROXY: edge
 
       # ── Admin ────────────────────────────────────────────────────────────
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: Admin_UOB_2025!
+      # Plus de création automatique d'admin
+      # L'administrateur sera créé via le formulaire Keycloak
 
       # ── Features activées (vos modules IAM) ─────────────────────────────
       KC_FEATURES: preview,account-api,admin-fine-grained-authz
@@ -192,7 +192,7 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
 
-    command: start-dev
+    command: start
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
       interval: 15s

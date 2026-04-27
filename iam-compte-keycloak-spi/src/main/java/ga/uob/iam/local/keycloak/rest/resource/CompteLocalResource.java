@@ -23,34 +23,28 @@ import java.util.Map;
  *
  * URL de base : /realms/{realm}/compte-local
  *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ INTÉGRATION NATIVE KEYCLOAK                                             │
- * │                                                                         │
- * │ ✅ Authentification Bearer via AppAuthManager (même mécanisme que       │
- * │    l'API Admin native /admin/realms/{realm}/users)                      │
- * │ ✅ Vérification du realm — actif et existant automatiquement            │
- * │ ✅ CORS — configuré dans les settings du realm, appliqué ici            │
- * │ ✅ TLS / HTTPS — géré par Keycloak au niveau serveur                    │
- * │ ✅ Rate limiting — niveau realm Keycloak                                │
- * │ ✅ Realm Roles — iam-admin / iam-super-admin vérifiés nativement        │
- * │ ✅ Audit structuré — via CompteAuditLogger (JBoss MDC structuré)        │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * ARCHITECTURE RealmResourceProvider (sub-resource locator pattern) :
  *
- * NOTE sur l'audit :
- *   En Keycloak 26.x, KeycloakContext.getEvent() a été supprimé.
- *   L'EventBuilder natif est disponible dans keycloak-services mais nécessite
- *   un wiring complexe (AdminEventBuilder, connexion HTTP, etc.) non adapté
- *   à un RealmResourceProvider custom.
- *   On utilise ici un audit structuré via JBoss Logger avec MDC — toutes les
- *   actions sensibles sont tracées avec acteur, cible, action, motif, timestamp.
- *   Ces logs sont capturés par le système de log Keycloak (Quarkus/JBoss Logging)
- *   et peuvent être redirigés vers un SIEM.
+ *   1. Keycloak reçoit /realms/{realm}/compte-local/{suite...}
+ *   2. Il identifie "compte-local" → CompteResourceProviderFactory
+ *   3. Il appelle CompteResourceProvider.getResource() → retourne cette classe
+ *   4. JAX-RS traite "/{suite...}" avec les @Path des MÉTHODES de cette classe
  *
- * RÔLES REQUIS (à créer dans le realm Keycloak Admin Console) :
- *   - iam-admin       : lecture + modification normale
- *   - iam-super-admin : suspension, réactivation, désactivation définitive
+ * IMPORTANT — PAS de @Path sur la classe :
+ *   Un @Path("") ou @Path("/") au niveau classe transforme cette ressource
+ *   en ressource racine JAX-RS qui capture TOUTES les URLs de Quarkus
+ *   (/docs/, /favicon.ico, /q/dev/, etc.).
+ *   Dans le pattern sub-resource locator, seuls les @Path des méthodes comptent.
+ *   L'annotation de classe doit être ABSENTE.
+ *
+ * Endpoints opérationnels :
+ *   GET    /realms/{realm}/compte-local/{userIdNational}
+ *   GET    /realms/{realm}/compte-local/by-national/{identifiantNational}
+ *   PATCH  /realms/{realm}/compte-local/{userIdNational}
+ *   POST   /realms/{realm}/compte-local/{userIdNational}/suspendre
+ *   POST   /realms/{realm}/compte-local/{userIdNational}/reactiver
+ *   DELETE /realms/{realm}/compte-local/{userIdNational}
  */
-@Path("")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
 public class CompteLocalResource {
@@ -61,11 +55,37 @@ public class CompteLocalResource {
     private static final String ROLE_IAM_SUPER_ADMIN = "iam-super-admin";
 
     private final KeycloakSession session;
-    private final RealmModel      realm;
 
     public CompteLocalResource(KeycloakSession session) {
         this.session = session;
-        this.realm   = session.getContext().getRealm();
+    }
+
+    /**
+     * Récupère le realm lazy depuis le contexte de session.
+     * Retourne null si absent — chaque méthode gère ce cas proprement.
+     */
+    private RealmModel getRealm() {
+        return session.getContext().getRealm();
+    }
+
+    /**
+     * Vérifie la présence du realm. Retourne une Response d'erreur si absent,
+     * null si tout est bon.
+     *
+     * On ne throw jamais ici — une exception non enveloppée dans une Response
+     * complète (avec MediaType) casse DefaultSecurityHeadersProvider.
+     */
+    private Response verifierRealm(RealmModel realm) {
+        if (realm == null) {
+            log.warnf("getRealm() null — URL mal formée ou contexte Keycloak non initialisé");
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .type(MediaType.APPLICATION_JSON)
+                           .entity(erreurBody(400, "REALM_MANQUANT",
+                                   "URL invalide. Format attendu : " +
+                                   "/realms/{realm-name}/compte-local/{userIdNational}"))
+                           .build();
+        }
+        return null;
     }
 
     // =========================================================================
@@ -75,8 +95,8 @@ public class CompteLocalResource {
     /**
      * GET /realms/{realm}/compte-local/{userIdNational}
      *
-     * Retourne les champs natifs id_compte_local, identifiant_national, statut_compte
-     * lus directement depuis USER_ENTITY (colonne native, pas de jointure USER_ATTRIBUTE).
+     * Retourne les champs natifs du profil Keycloak (id_compte_local,
+     * identifiant_national, statut_compte) lus directement depuis USER_ENTITY.
      *
      * Sécurité : rôle iam-admin requis.
      */
@@ -85,23 +105,30 @@ public class CompteLocalResource {
     public Response getParUserIdNational(
             @PathParam("userIdNational") String userIdNational
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_ADMIN);
 
         UserModel user = session.users().getUserById(realm, userIdNational);
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour userIdNational=" + userIdNational);
+                          "Aucun profil trouvé pour userIdNational=" + userIdNational);
         }
 
-        audit(auth, "LECTURE", userIdNational, null);
-        return Response.ok(construireRepresentation(user)).build();
+        audit(auth, realm, "LECTURE", userIdNational, null);
+        return Response.ok(construireRepresentation(user))
+                       .type(MediaType.APPLICATION_JSON)
+                       .build();
     }
 
     /**
      * GET /realms/{realm}/compte-local/by-national/{identifiantNational}
      *
      * Recherche par numéro national (ETU-2025-00412).
-     * Utilise la recherche par attribut natif Keycloak sur IDENTIFIANT_NATIONAL.
+     * Utilise la colonne native IDENTIFIANT_NATIONAL (index, pas de jointure).
      *
      * Sécurité : rôle iam-admin requis.
      */
@@ -110,7 +137,12 @@ public class CompteLocalResource {
     public Response getParIdentifiantNational(
             @PathParam("identifiantNational") String identifiantNational
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_ADMIN);
 
         UserModel user = session.users()
             .searchForUserByUserAttributeStream(
@@ -123,24 +155,26 @@ public class CompteLocalResource {
 
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour identifiantNational=" + identifiantNational);
+                          "Aucun profil trouvé pour identifiantNational=" + identifiantNational);
         }
 
-        audit(auth, "LECTURE_PAR_IDENTIFIANT", user.getId(), null);
-        return Response.ok(construireRepresentation(user)).build();
+        audit(auth, realm, "LECTURE_PAR_IDENTIFIANT", user.getId(), null);
+        return Response.ok(construireRepresentation(user))
+                       .type(MediaType.APPLICATION_JSON)
+                       .build();
     }
 
     // =========================================================================
-    // MODIFICATION MANUELLE (CAS EXTRÊME)
+    // MODIFICATION MANUELLE (CAS EXTRÊME — motif obligatoire min 20 chars)
     // =========================================================================
 
     /**
      * PATCH /realms/{realm}/compte-local/{userIdNational}
      *
-     * Modifie manuellement les champs d'un profil Keycloak.
-     * Motif administratif obligatoire — minimum 20 caractères.
+     * Modification administrative d'urgence des données nominales.
+     * En fonctionnement normal, tout passe par Kafka depuis l'IAM Central.
      *
-     * Sécurité : rôle iam-admin requis.
+     * Sécurité : rôle iam-admin requis + motif ≥ 20 caractères.
      */
     @PATCH
     @Path("/{userIdNational}")
@@ -148,20 +182,24 @@ public class CompteLocalResource {
             @PathParam("userIdNational") String userIdNational,
             ModifierCompteRepresentation body
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_ADMIN);
 
         if (body == null || body.getMotif() == null || body.getMotif().trim().length() < 20) {
             return erreur(400, "MOTIF_INVALIDE",
-                          "Le motif est obligatoire et doit avoir au moins 20 caractères");
+                          "Le motif est obligatoire (minimum 20 caractères)");
         }
 
         UserModel user = session.users().getUserById(realm, userIdNational);
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour userIdNational=" + userIdNational);
+                          "Aucun profil trouvé pour userIdNational=" + userIdNational);
         }
 
-        // Modification des champs Keycloak standard — uniquement si fournis
         if (body.getNom() != null && !body.getNom().isBlank()) {
             user.setLastName(body.getNom().trim());
         }
@@ -172,8 +210,10 @@ public class CompteLocalResource {
             user.setEmail(body.getEmailInstitutionnel().trim());
         }
 
-        audit(auth, "MODIFICATION_MANUELLE", userIdNational, body.getMotif());
-        return Response.ok(construireRepresentation(user)).build();
+        audit(auth, realm, "MODIFICATION_MANUELLE", userIdNational, body.getMotif());
+        return Response.ok(construireRepresentation(user))
+                       .type(MediaType.APPLICATION_JSON)
+                       .build();
     }
 
     // =========================================================================
@@ -183,8 +223,8 @@ public class CompteLocalResource {
     /**
      * POST /realms/{realm}/compte-local/{userIdNational}/suspendre
      *
-     * Suspend le profil Keycloak : enabled=false, statutCompte=SUSPENDU.
-     * Suspension RÉVERSIBLE — un compte suspendu peut être réactivé.
+     * Suspension temporaire et RÉVERSIBLE.
+     * enabled=false + statutCompte=SUSPENDU dans USER_ENTITY.
      *
      * Sécurité : rôle iam-super-admin requis.
      */
@@ -194,7 +234,12 @@ public class CompteLocalResource {
             @PathParam("userIdNational") String userIdNational,
             MotifRepresentation body
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_SUPER_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_SUPER_ADMIN);
 
         if (body == null || body.getMotif() == null || body.getMotif().trim().length() < 10) {
             return erreur(400, "MOTIF_INVALIDE",
@@ -204,14 +249,14 @@ public class CompteLocalResource {
         UserModel user = session.users().getUserById(realm, userIdNational);
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour userIdNational=" + userIdNational);
+                          "Aucun profil trouvé pour userIdNational=" + userIdNational);
         }
 
-        String statutActuel = user.getStatutCompte();
-        if ("SUSPENDU".equals(statutActuel)) {
+        String statut = user.getStatutCompte();
+        if ("SUSPENDU".equals(statut)) {
             return erreur(422, "COMPTE_DEJA_SUSPENDU", "Ce compte est déjà suspendu");
         }
-        if ("DESACTIVE".equals(statutActuel)) {
+        if ("DESACTIVE".equals(statut)) {
             return erreur(422, "COMPTE_DESACTIVE",
                           "Impossible de suspendre un compte désactivé définitivement");
         }
@@ -219,14 +264,15 @@ public class CompteLocalResource {
         user.setEnabled(false);
         user.setStatutCompte("SUSPENDU");
 
-        audit(auth, "SUSPENSION", userIdNational, body.getMotif());
+        audit(auth, realm, "SUSPENSION", userIdNational, body.getMotif());
         return Response.noContent().build();
     }
 
     /**
      * POST /realms/{realm}/compte-local/{userIdNational}/reactiver
      *
-     * Réactive un profil Keycloak suspendu : enabled=true, statutCompte=ACTIF.
+     * Réactivation d'un compte suspendu.
+     * enabled=true + statutCompte=ACTIF dans USER_ENTITY.
      *
      * Sécurité : rôle iam-super-admin requis.
      */
@@ -236,7 +282,12 @@ public class CompteLocalResource {
             @PathParam("userIdNational") String userIdNational,
             MotifRepresentation body
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_SUPER_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_SUPER_ADMIN);
 
         if (body == null || body.getMotif() == null || body.getMotif().trim().length() < 10) {
             return erreur(400, "MOTIF_INVALIDE",
@@ -246,14 +297,14 @@ public class CompteLocalResource {
         UserModel user = session.users().getUserById(realm, userIdNational);
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour userIdNational=" + userIdNational);
+                          "Aucun profil trouvé pour userIdNational=" + userIdNational);
         }
 
-        String statutActuel = user.getStatutCompte();
-        if ("ACTIF".equals(statutActuel)) {
+        String statut = user.getStatutCompte();
+        if ("ACTIF".equals(statut)) {
             return erreur(422, "COMPTE_DEJA_ACTIF", "Ce compte est déjà actif");
         }
-        if ("DESACTIVE".equals(statutActuel)) {
+        if ("DESACTIVE".equals(statut)) {
             return erreur(422, "COMPTE_DESACTIVE",
                           "Impossible de réactiver un compte désactivé définitivement");
         }
@@ -261,15 +312,15 @@ public class CompteLocalResource {
         user.setEnabled(true);
         user.setStatutCompte("ACTIF");
 
-        audit(auth, "REACTIVATION", userIdNational, body.getMotif());
+        audit(auth, realm, "REACTIVATION", userIdNational, body.getMotif());
         return Response.noContent().build();
     }
 
     /**
      * DELETE /realms/{realm}/compte-local/{userIdNational}
      *
-     * Désactive DÉFINITIVEMENT un profil Keycloak.
-     * OPÉRATION IRRÉVERSIBLE LOCALEMENT.
+     * Désactivation DÉFINITIVE et IRRÉVERSIBLE localement.
+     * enabled=false + statutCompte=DESACTIVE dans USER_ENTITY.
      *
      * Sécurité : rôle iam-super-admin requis.
      */
@@ -278,12 +329,17 @@ public class CompteLocalResource {
     public Response desactiver(
             @PathParam("userIdNational") String userIdNational
     ) {
-        AuthenticationManager.AuthResult auth = verifierAuthentificationEtRole(ROLE_IAM_SUPER_ADMIN);
+        RealmModel realm = getRealm();
+        Response realmCheck = verifierRealm(realm);
+        if (realmCheck != null) return realmCheck;
+
+        AuthenticationManager.AuthResult auth =
+            verifierAuthentificationEtRole(realm, ROLE_IAM_SUPER_ADMIN);
 
         UserModel user = session.users().getUserById(realm, userIdNational);
         if (user == null) {
             return erreur(404, "COMPTE_INTROUVABLE",
-                          "Aucun profil Keycloak trouvé pour userIdNational=" + userIdNational);
+                          "Aucun profil trouvé pour userIdNational=" + userIdNational);
         }
 
         if ("DESACTIVE".equals(user.getStatutCompte())) {
@@ -293,64 +349,78 @@ public class CompteLocalResource {
         user.setEnabled(false);
         user.setStatutCompte("DESACTIVE");
 
-        audit(auth, "DESACTIVATION_DEFINITIVE", userIdNational, null);
+        audit(auth, realm, "DESACTIVATION_DEFINITIVE", userIdNational, null);
         return Response.noContent().build();
     }
 
     // =========================================================================
-    // Sécurité — authentification et vérification des rôles
+    // Sécurité — authentification + vérification du rôle realm
     // =========================================================================
 
     /**
-     * Vérifie le token Bearer et le rôle requis.
+     * Pose le realm dans le contexte de session, authentifie le token Bearer,
+     * puis vérifie que l'acteur possède le rôle requis dans ce realm.
      *
-     * Utilise AppAuthManager.BearerTokenAuthenticator — c'est exactement
-     * le même mécanisme que les API admin natives de Keycloak.
+     * session.getContext().setRealm(realm) est obligatoire avant authenticate() :
+     * BearerTokenAuthenticator en a besoin pour construire l'issuer attendu
+     * et valider la signature du token.
      *
-     * En Keycloak 26.x, authResult.getUser() est déprécié.
-     * On passe par authResult.getToken() pour récupérer le subject (userId)
-     * puis on charge le UserModel pour vérifier les rôles realm.
-     *
-     * @throws NotAuthorizedException si token absent ou invalide (→ HTTP 401)
-     * @throws ForbiddenException     si rôle insuffisant (→ HTTP 403)
+     * @throws NotAuthorizedException (→ 401) si token absent ou invalide
+     * @throws ForbiddenException     (→ 403) si rôle insuffisant
      */
-    private AuthenticationManager.AuthResult verifierAuthentificationEtRole(String roleRequis) {
+    private AuthenticationManager.AuthResult verifierAuthentificationEtRole(
+            RealmModel realm,
+            String roleRequis
+    ) {
+        session.getContext().setRealm(realm);
 
         AuthenticationManager.AuthResult authResult =
             new AppAuthManager.BearerTokenAuthenticator(session).authenticate();
 
         if (authResult == null) {
             throw new NotAuthorizedException(
-                "Token Bearer absent ou invalide",
+                "Token Bearer requis",
                 Response.status(Response.Status.UNAUTHORIZED)
+                        .type(MediaType.APPLICATION_JSON)
                         .entity(erreurBody(401, "NON_AUTHENTIFIE",
                                 "Un token Bearer valide est requis"))
                         .build()
             );
         }
 
-        // Récupération du UserModel via le subject du token (non déprécié)
+        // getUser() est déprécié en Keycloak 26.x — on passe par le token
         AccessToken token = authResult.getToken();
-        UserModel acteur  = session.users().getUserById(realm, token.getSubject());
+        
+        // Pour admin-cli, token.getSubject() et getPreferredUsername() peuvent être null.
+        // On récupère l'utilisateur depuis l'authResult directement.
+        UserModel acteur = authResult.getUser();
+        
+        // Debug temporaire
+        log.infof("DEBUG: authResult=%s, acteur=%s, token=%s", 
+                 authResult != null ? "OK" : "NULL", 
+                 acteur != null ? acteur.getUsername() : "NULL",
+                 token != null ? "OK" : "NULL");
 
         if (acteur == null) {
             throw new ForbiddenException(
                 Response.status(Response.Status.FORBIDDEN)
+                        .type(MediaType.APPLICATION_JSON)
                         .entity(erreurBody(403, "ACTEUR_INTROUVABLE",
-                                "L'utilisateur du token est introuvable dans ce realm"))
+                                "L'utilisateur du token est introuvable dans le realm " +
+                                realm.getName()))
                         .build()
             );
         }
 
-        // Vérification du rôle realm
         boolean aLeRole = acteur.getRealmRoleMappingsStream()
-                                .anyMatch(role -> roleRequis.equals(role.getName()));
+                                .anyMatch(r -> roleRequis.equals(r.getName()));
 
         if (!aLeRole) {
             throw new ForbiddenException(
                 Response.status(Response.Status.FORBIDDEN)
+                        .type(MediaType.APPLICATION_JSON)
                         .entity(erreurBody(403, "ACCES_REFUSE",
-                                "Le rôle '" + roleRequis + "' est requis pour cette opération"))
+                                "Le rôle '" + roleRequis + "' est requis"))
                         .build()
             );
         }
@@ -359,50 +429,33 @@ public class CompteLocalResource {
     }
 
     // =========================================================================
-    // Audit structuré
+    // Audit structuré [IAM-AUDIT]
     // =========================================================================
 
-    /**
-     * Trace chaque action sensible avec acteur, realm, cible, action, motif, timestamp.
-     *
-     * EN KEYCLOAK 26.x : KeycloakContext.getEvent() n'existe plus.
-     * L'EventBuilder natif (keycloak-services) est disponible mais son wiring
-     * dans un RealmResourceProvider custom nécessite des dépendances circulaires
-     * et un accès à AdminEventBuilder qui est interne à l'API admin Keycloak.
-     *
-     * SOLUTION RETENUE : audit via JBoss Logger structuré avec MDC.
-     * Ces logs sont capturés par le système de log Keycloak/Quarkus
-     * et peuvent être redirigés vers un SIEM (Elastic, Splunk, etc.)
-     * via la configuration de logging Quarkus (quarkus.log.handler.*).
-     *
-     * FORMAT : [IAM-AUDIT] action=X realm=Y acteur=Z cible=W motif=M timestamp=T
-     */
     private void audit(
             AuthenticationManager.AuthResult auth,
+            RealmModel realm,
             String action,
-            String cibleUserIdNational,
+            String cible,
             String motif
     ) {
-        AccessToken token       = auth.getToken();
-        String      acteurId    = token.getSubject();
-        String      acteurLogin = token.getPreferredUsername();
-        String      realmNom    = realm.getName();
-        String      timestamp   = Instant.now().toString();
+        AccessToken token   = auth.getToken();
+        String acteurId     = token.getSubject();
+        String acteurLogin  = token.getPreferredUsername();
+        String realmNom     = realm.getName();
+        String ts           = Instant.now().toString();
 
-        // Log structuré — format parseable par un SIEM
         if (motif != null) {
-            log.warnf("[IAM-AUDIT] action=%s realm=%s acteur=%s(%s) cible=%s motif='%s' timestamp=%s",
-                      action, realmNom, acteurLogin, acteurId,
-                      cibleUserIdNational, motif, timestamp);
+            log.warnf("[IAM-AUDIT] action=%s realm=%s acteur=%s(%s) cible=%s motif='%s' ts=%s",
+                      action, realmNom, acteurLogin, acteurId, cible, motif, ts);
         } else {
-            log.infof("[IAM-AUDIT] action=%s realm=%s acteur=%s(%s) cible=%s timestamp=%s",
-                      action, realmNom, acteurLogin, acteurId,
-                      cibleUserIdNational, timestamp);
+            log.infof("[IAM-AUDIT] action=%s realm=%s acteur=%s(%s) cible=%s ts=%s",
+                      action, realmNom, acteurLogin, acteurId, cible, ts);
         }
     }
 
     // =========================================================================
-    // Construction des représentations et réponses d'erreur
+    // Helpers — représentation et erreurs
     // =========================================================================
 
     private CompteLocalRepresentation construireRepresentation(UserModel user) {
@@ -419,12 +472,12 @@ public class CompteLocalResource {
 
     private Response erreur(int statut, String code, String message) {
         return Response.status(statut)
+                       .type(MediaType.APPLICATION_JSON)
                        .entity(erreurBody(statut, code, message))
                        .build();
     }
 
     private Map<String, Object> erreurBody(int statut, String code, String message) {
-        // LinkedHashMap pour garantir l'ordre des champs dans le JSON
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("statut",    statut);
         body.put("code",      code);

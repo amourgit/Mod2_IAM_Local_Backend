@@ -35,8 +35,8 @@ DEFAULT_KC_DB="postgres"
 DEFAULT_KC_DB_URL="jdbc:postgresql://localhost:5432/keycloak_iam_local"
 DEFAULT_KC_DB_USERNAME="keycloak"
 DEFAULT_KC_DB_PASSWORD="keycloak_secret_uob_2025"
-DEFAULT_KEYCLOAK_ADMIN="admin"
-DEFAULT_KEYCLOAK_ADMIN_PASSWORD="admin123"
+# Plus de création automatique d'admin
+# L'administrateur sera créé via le formulaire Keycloak
 
 # Fichier .env
 ENV_FILE=".env"
@@ -159,16 +159,15 @@ start_keycloak() {
     export KC_DB_URL="${KC_DB_URL:-$DEFAULT_KC_DB_URL}"
     export KC_DB_USERNAME="${KC_DB_USERNAME:-$DEFAULT_KC_DB_USERNAME}"
     export KC_DB_PASSWORD="${KC_DB_PASSWORD:-$DEFAULT_KC_DB_PASSWORD}"
-    export KEYCLOAK_ADMIN="${KEYCLOAK_ADMIN:-$DEFAULT_KEYCLOAK_ADMIN}"
-    export KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-$DEFAULT_KEYCLOAK_ADMIN_PASSWORD}"
+    # Pas de variables admin - Keycloak gérera la création
+    # via le premier accès à l'Admin Console
     
     # Affichage de la configuration
     log_success "=== CONFIGURATION KEYCLOAK ==="
     echo -e "${BLUE}Base de données:${NC} $KC_DB"
     echo -e "${BLUE}URL:${NC} $KC_DB_URL"
     echo -e "${BLUE}Utilisateur:${NC} $KC_DB_USERNAME"
-    echo -e "${BLUE}Admin:${NC} $KEYCLOAK_ADMIN"
-    echo -e "${BLUE}Admin Password:${NC} $KEYCLOAK_ADMIN_PASSWORD"
+    echo -e "${BLUE}Admin:${NC} Création via formulaire au premier accès"
     echo
     
     # Démarrage
@@ -180,9 +179,9 @@ start_keycloak() {
 show_access_info() {
     echo
     log_success "=== ACCÈS KEYCLOAK ==="
-    echo -e "${BLUE}Console Admin:${NC} http://localhost:8080"
-    echo -e "${BLUE}Utilisateur:${NC} ${KEYCLOAK_ADMIN:-$DEFAULT_KEYCLOAK_ADMIN}"
-    echo -e "${BLUE}Mot de passe:${NC} ${KEYCLOAK_ADMIN_PASSWORD:-$DEFAULT_KEYCLOAK_ADMIN_PASSWORD}"
+    echo -e "${BLUE}Admin Console:${NC} http://localhost:8080/admin"
+    echo -e "${BLUE}Premier accès:${NC} Créer l'administrateur via le formulaire"
+    echo
     echo
     echo -e "${BLUE}API REST:${NC} http://localhost:8080/realms/master/protocol/openid-connect/token"
     echo
